@@ -28,7 +28,6 @@ async function parse(page) {
         }, selector);
     };
 
-    const result = {};
     const selectors = {
         date: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1)",
         time: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)",
@@ -52,10 +51,28 @@ async function parse(page) {
         homeGoals: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(3) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(3) > td:nth-child(7)",
 
     };
-    for (var name in selectors) {
-        result[name]  = await getHTML(selectors[name]);
+
+    const base_event = {
+        league: await page.$eval(selectors.league, e => e.innerText.replace(/^League: */, "")),
+        level: await page.$eval(selectors.level, e => e.innerText.replace(/^Level: */, "")),
+        location: await page.$eval(selectors.location, e => e.innerText.replace(/^Location: */, "")),
+        staff: {
+            scorekeeper: await page.$eval(selectors.scorekeeper, e => e.innerText),
+            referee: await page.$$eval([selectors.referee1, selectors.referee2].join(","), e => e.map(i => i.innerText)),
+        },
+        // game id
+        // game_type
+        // season
     }
-    console.log(result);
+
+    const hscoring = await page.$$eval(selectors.homeScoring, e => e.map(s => {
+        var period, time, note, scorer, assist1, assist2;
+        [period, time, note, scorer, assist1, assist2]= s.querySelectorAll("td")
+        console.log(`Goal scored in period ${period.innerText}@${time.innerText} by number ${scorer.innerText}`);
+    }));
+    const vscoring = await page.$$eval(selectors.visitorScoring, e => e.map(i => i.innerText));
+    console.log(vscoring);
+    console.log(hscoring);
 }; // parse
 
 (async () => {
