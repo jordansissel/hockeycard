@@ -7,24 +7,6 @@ const path = require("path");
 const pathToURL = (local) => "file:///" + path.resolve(local).replace(/\\/g, "/")
 
 async function parse() {
-    const getHTML = (selector) => {
-        const elements = document.querySelectorAll(selector);
-        if (elements.length === 0) {
-            return { error: "Selector did not match anything: " + selector };
-        }
-        const result = {
-            html: [],
-            text: [],
-        }
-
-        //console.log("Element count: " + elements.length + " // " + selector);
-        elements.forEach(i => {
-            result.html.push(i.innerHTML);
-            result.text.push(i.innerText);
-        });
-        return result;
-    };
-
     const selectors = {
         date: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1)",
         time: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)",
@@ -48,14 +30,18 @@ async function parse() {
         homeGoals: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(3) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(3) > td:nth-child(7)",
     };
 
-    const text = el => { 
-        if (el.innerText) {
+    const text = el => {
+        if (el !== undefined && el.innerText) {
             return el.innerText.trim();
         } else {
             return undefined;
         }
     }
     const numeric = el => parseInt(text(el));
+
+    const date = document.querySelector(selectors.date).innerText.replace(/^Date: */, "");
+    const time = document.querySelector(selectors.time).innerText.replace(/^Time: */, "");
+    const gameTime = new Date(date + " " + time);
 
     const base_event = {
         league: document.querySelector(selectors.league).innerText.replace(/^League: */, ""),
@@ -66,28 +52,69 @@ async function parse() {
         // game id
         // game_type
         // season
-    }
-    
-    const team = { 
-        home: text(document.querySelector(selectors.home)),
-        visitor: text(document.querySelector(selectors.visitor)),
     };
-    const parseScoring = element => {
-        var period, otime, note, scorer, assist1, assist2;
+
+    const team = {
+        home: {
+            name: text(document.querySelector(selectors.home)),
+            players: {},
+        },
+        visitor: {
+            name: text(document.querySelector(selectors.visitor)),
+            players: {},
+        },
+    };
+
+    const parsePlayers = (selector, store) => {
+        document.querySelectorAll(selector).forEach(a => {
+            const cells = Array.from(a.querySelectorAll("td"));
+            if (text(cells[2]) !== "") {
+                store[numeric(cells[0])] = { name: text(cells[2]), number: numeric(cells[0]), position: text(cells[1]) };
+            }
+            if (text(cells[5]) !== "") {
+                store[numeric(cells[3])] = { name: text(cells[5]), number: numeric(cells[3]), position: text(cells[4]) };
+            }
+        });
+    };
+    parsePlayers(selectors.visitorPlayers, team.visitor.players);
+    parsePlayers(selectors.homePlayers, team.home.players);
+
+    console.log(gameTime.toJSON() + ":  start...");
+    const parseScoring = (players, element) => {
+        var period, time, note, scorer, assist1, assist2;
         [period, time, note, scorer, assist1, assist2] = element.querySelectorAll("td")
+
+        // Times are noted as "time left in the period", so a time of "2:02" means 
+        // the event occurred at 17m58s into the period.
+        const endOfPeriod = gameTime.valueOf() + (numeric(period) * 20 * 60 * 1000);
+
+        var timestamp;
+        if (/:/.test(text(time))) { 
+            var m, s; // mm:ss time format
+            [m, s] = text(time).split(":").map(x => parseInt(x));
+            // Millisecond time of the game when the event occurred. 
+            timestamp = new Date(endOfPeriod - ((m * 60) + s) * 1000);
+        } else {
+            // assume ss.SS time format
+            const s = numeric(time);
+            timestamp = new Date(endOfPeriod - (s * 1000));
+        }
+
+        //console.log(text(period) + "@" + text(time));
+        //console.log(timestamp.toJSON() + ": " + players[numeric(scorer)].name + " scored");;
         return {
-            period: text(period),
+            period: numeric(period),
             time: text(time),
-            note: text(note),
-            scorer: numeric(scorer),
-            assists: [numeric(assist1), numeric(assist2)].filter(n => !isNaN(n)),
+            note: text(note) !== "" ? text(note) : undefined,
+            scorer: players[numeric(scorer)],
+            assists: [numeric(assist1), numeric(assist2)].filter(n => !isNaN(n)).map(n => players[n]),
+            '@timestamp':  timestamp,
         };
     };
     const events = [];
-    events.push.apply(events, Array.from(document.querySelectorAll(selectors.homeScoring)).map(parseScoring).map(i => { i.team = team.home; return i; }));
-    events.push.apply(events, Array.from(document.querySelectorAll(selectors.visitorScoring)).map(parseScoring).map(i => { i.team = team.visitor; return i; }));
+    events.push.apply(events, Array.from(document.querySelectorAll(selectors.homeScoring)).map(s => parseScoring(team.home.players, s)).map(i => { i.team = team.home.name; return i; }));
+    events.push.apply(events, Array.from(document.querySelectorAll(selectors.visitorScoring)).map(s => parseScoring(team.visitor.players, s)).map(i => { i.team = team.visitor.name; return i; }));
     events.forEach(i => console.log(JSON.stringify(i)));
-
 }; // parse
 
 (async () => {
@@ -99,12 +126,5 @@ async function parse() {
     await page.goto(fixture);
     await page.evaluate(parse);
 
-    //await new Promise((resolve, reject) => {
-        //const repl = require("repl");
-        //const r = repl.start();
-        //r.context.page = page;
-        //r.on("exit", resolve);
-        //r.on("error", reject);
-    //})
     await browser.close();
 })();
