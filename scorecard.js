@@ -1,11 +1,5 @@
 'use strict';
 
-const puppeteer = require('puppeteer');
-const path = require("path");
-
-// nodejs stable (8) idoesn't have path-to-file-url yet.
-const pathToURL = (local) => "file:///" + path.resolve(local).replace(/\\/g, "/")
-
 async function parse() {
     const selectors = {
         date: "body > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1)",
@@ -68,11 +62,15 @@ async function parse() {
     const parsePlayers = (selector, store) => {
         document.querySelectorAll(selector).forEach(a => {
             const cells = Array.from(a.querySelectorAll("td"));
-            if (text(cells[2]) !== "") {
-                store[numeric(cells[0])] = { name: text(cells[2]), number: numeric(cells[0]), position: text(cells[1]) };
+            if (text(cells[2]) !== "" && text(cells[2]) !== undefined) {
+                // console.log(JSON.stringify(text(cells[2])) + " / " + typeof (text(cells[2])));
+                const n = isNaN(numeric(cells[0])) ? 0 : numeric(cells[0]);
+                store[n] = { name: text(cells[2]), number: n, position: text(cells[1]) };
             }
-            if (text(cells[5]) !== "") {
-                store[numeric(cells[3])] = { name: text(cells[5]), number: numeric(cells[3]), position: text(cells[4]) };
+            if (text(cells[5]) !== "" && text(cells[5]) !== undefined) {
+                // console.log(JSON.stringify(text(cells[5])) + " / " + typeof (text(cells[5])));
+                const n = isNaN(numeric(cells[3])) ? 0 : numeric(cells[3]);
+                store[n] = { name: text(cells[5]), number: n, position: text(cells[4]) };
             }
         });
     };
@@ -80,51 +78,72 @@ async function parse() {
     parsePlayers(selectors.homePlayers, team.home.players);
 
     console.log(gameTime.toJSON() + ":  start...");
+    const computePeriodTime = (timeText) => {
+        // Times are noted as "time left in the period", so a time of "2:02" means 
+        // the event occurred at 17m58s into the period.
+        if (/:/.test(timeText)) { 
+            var m, s; // mm:ss time format
+            [m, s] = timeText.split(":").map(x => parseInt(x));
+            // Millisecond time of the game when the event occurred. 
+            //console.log(timeText + ": " + ((m * 60) + s) * 1000);
+            return ((m * 60) + s) * 1000;
+        } else {
+            // assume ss.SS time format
+            const s = parseFloat(timeText);
+            //console.log(timeText + ": " + (s * 1000));
+            return  (s * 1000);
+        }
+    };
+    const computeTimestamp = (period, timeText) => {
+        const endOfPeriod = period * 20 * 60 * 1000;
+        return new Date(gameTime.valueOf() + (endOfPeriod - computePeriodTime(timeText)));
+    };
     const parseScoring = (players, element) => {
         var period, time, note, scorer, assist1, assist2;
         [period, time, note, scorer, assist1, assist2] = element.querySelectorAll("td")
+        const timestamp = computeTimestamp(numeric(period), text(time));
 
-        // Times are noted as "time left in the period", so a time of "2:02" means 
-        // the event occurred at 17m58s into the period.
-        const endOfPeriod = gameTime.valueOf() + (numeric(period) * 20 * 60 * 1000);
-
-        var timestamp;
-        if (/:/.test(text(time))) { 
-            var m, s; // mm:ss time format
-            [m, s] = text(time).split(":").map(x => parseInt(x));
-            // Millisecond time of the game when the event occurred. 
-            timestamp = new Date(endOfPeriod - ((m * 60) + s) * 1000);
-        } else {
-            // assume ss.SS time format
-            const s = numeric(time);
-            timestamp = new Date(endOfPeriod - (s * 1000));
-        }
-
-        //console.log(text(period) + "@" + text(time));
-        //console.log(timestamp.toJSON() + ": " + players[numeric(scorer)].name + " scored");;
         return {
+            type: "scoring",
             period: numeric(period),
-            time: text(time),
+            time: computePeriodTime(text(time)) / 1000, // period time in seconds since start of period`
             note: text(note) !== "" ? text(note) : undefined,
-            scorer: players[numeric(scorer)],
+            player: players[numeric(scorer)],
             assists: [numeric(assist1), numeric(assist2)].filter(n => !isNaN(n)).map(n => players[n]),
+            '@timestamp':  timestamp,
+        };
+    };
+
+    const parsePenalties = (players, element) => {
+        var period, player, infraction, minutes, off_ice, start, end, on_ice;
+        [period, player, infraction, minutes, off_ice, start, end, on_ice] = element.querySelectorAll("td")
+        const timestamp = computeTimestamp(numeric(period), text(off_ice));
+
+        return {
+            type: "penalty",
+            period: numeric(period),
+            minutes: numeric(minutes),
+            off_ice: computePeriodTime(text(off_ice)) / 1000, // period time in seconds since start of period`
+            infraction: text(infraction).toLowerCase(),
+            player: players[numeric(player)],
             '@timestamp':  timestamp,
         };
     };
     const events = [];
     events.push.apply(events, Array.from(document.querySelectorAll(selectors.homeScoring)).map(s => parseScoring(team.home.players, s)).map(i => { i.team = team.home.name; return i; }));
     events.push.apply(events, Array.from(document.querySelectorAll(selectors.visitorScoring)).map(s => parseScoring(team.visitor.players, s)).map(i => { i.team = team.visitor.name; return i; }));
-    events.forEach(i => console.log(JSON.stringify(i)));
+    events.push.apply(events, Array.from(document.querySelectorAll(selectors.homePenalties)).map(s => parsePenalties(team.home.players, s)).map(i => { i.team = team.home.name; return i; }));
+    events.push.apply(events, Array.from(document.querySelectorAll(selectors.visitorPenalties)).map(s => parsePenalties(team.visitor.players, s)).map(i => { i.team = team.visitor.name; return i; }));
+    events.sort((a, b) => a["@timestamp"].valueOf() - b["@timestamp"].valueOf());
+
+    events.map(i => Object.assign(i, base_event));
+
+    // call .toJSON on the timestamp because Chrome->Node transit doesn't seem to understand how to 
+    // transmit a Date object (it sends {} instead of the Date object)
+    return {
+        team: team,
+        events: events.map(i => { i["@timestamp"] = i["@timestamp"].toJSON(); return i; }),
+    }
 }; // parse
 
-(async () => {
-    const browser = await puppeteer.launch()
-    const page = await browser.newPage();
-    page.on("console", message => console.log("[browser log] " + message.text()));
-
-    const fixture = pathToURL("./180176.html");
-    await page.goto(fixture);
-    await page.evaluate(parse);
-
-    await browser.close();
-})();
+exports.parse = parse;
